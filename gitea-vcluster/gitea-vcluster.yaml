@@ -19,22 +19,22 @@ spec:
   valuesContent: |-
     # vCluster Helm chart values
     vcluster:
-      image: rancher/k3s:v1.33.0+k3s1 # K3s version for the vcluster, update as needed
+      image: rancher/k3s:v1.31.3-k3s1 # K3s version for the vcluster, update as needed
     sync:
       ingresses:
         enabled: "true" # Sync ingresses from vcluster to host cluster
-    storage: # vCluster's own etcd/kine storage
+    storage: # vCluster's own etcd/kind storage
       persistence: true
-      size: 10Gi
+      size: 20Gi
     syncer:
       resources:
         limits:
-          memory: 2Gi # Adjust as needed for vcluster syncer
+          memory: 4Gi # Adjust as needed for vcluster syncer
 
     # Custom values for the Gitea addon, used in manifestsTemplate
-    hostname: "" # MANDATORY: Your base domain, e.g., "example.com". Gitea will be at gitea.example.com
-    cloudflareEmail: "" # MANDATORY: Your Cloudflare email address
-    cloudflareApiToken: "" # MANDATORY: Your Cloudflare API Token (Global API Key or restricted token with DNS edit permissions)
+    hostname: "" # MANDATORY:
+    cloudflareEmail: "" Cloudflare
+    cloudflareApiToken: "" # Cloudflare API Token
 
     certManager:
       chartVersion: "v1.15.1" # cert-manager Helm chart version
@@ -193,7 +193,7 @@ spec:
                 HOST: "postgresql-gitea-svc.gitea-system:5432" # Service name from postgresql chart + namespace
                 NAME: {{ .Values.postgresql.auth.database }}
                 USER: {{ .Values.postgresql.auth.username }}
-                PASSWD_FROM_SECRET_NAME: "postgresql-gitea-postgresql" # Secret created by Bitnami PostgreSQL chart (release name 'postgresql-gitea' + '-postgresql')
+                PASSWD_FROM_SECRET_NAME: "postgresql-gitea-postgresql" # Secret created by Bitnami PostgreSQL
                 PASSWD_FROM_SECRET_KEY: "postgres-password" # Key within the Bitnami PostgreSQL secret
                 SSL_MODE: "disable" # Change to "require" or "verify-full" if PostgreSQL SSL is configured
               service:
