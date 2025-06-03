@@ -1,0 +1,245 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea-vcluster
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: Addon
+metadata:
+  name: gitea-vcluster
+  namespace: gitea-vcluster
+  labels:
+    addon.harvesterhci.io/experimental: "true"
+    catalog.cattle.io/ui-component: "true"
+spec:
+  enabled: false # Set to true to enable the addon
+  repo: https://charts.loft.sh # vCluster Helm chart repository
+  version: "v0.19.0" # vCluster Helm chart version (check for latest)
+  chart: vcluster
+  valuesContent: |-
+    # vCluster Helm chart values
+    vcluster:
+      image: rancher/k3s:v1.33.0+k3s1 # K3s version for the vcluster, update as needed
+    sync:
+      ingresses:
+        enabled: "true" # Sync ingresses from vcluster to host cluster
+    storage: # vCluster's own etcd/kine storage
+      persistence: true
+      size: 10Gi
+    syncer:
+      resources:
+        limits:
+          memory: 2Gi # Adjust as needed for vcluster syncer
+
+    # Custom values for the Gitea addon, used in manifestsTemplate
+    hostname: "" # MANDATORY: Your base domain, e.g., "example.com". Gitea will be at gitea.example.com
+    cloudflareEmail: "" # MANDATORY: Your Cloudflare email address
+    cloudflareApiToken: "" # MANDATORY: Your Cloudflare API Token (Global API Key or restricted token with DNS edit permissions)
+
+    certManager:
+      chartVersion: "v1.15.1" # cert-manager Helm chart version
+
+    gitea:
+      chartVersion: "10.3.3" # Gitea Helm chart version (check for latest stable)
+      admin:
+        username: "giteaadmin"
+        password: "" # MANDATORY: Set a strong password for Gitea admin
+      persistence:
+        enabled: true
+        size: "30Gi"
+      config: # These values populate Gitea's app.ini
+        server:
+          disableRegistration: "false" # Set to "true" to disable public registration
+        actions:
+          enabled: "true" # Enable Gitea Actions
+
+    postgresql:
+      chartVersion: "15.5.18" # Bitnami PostgreSQL chart version (check for latest stable)
+      auth:
+        username: "gitea"
+        password: "" # MANDATORY: Set a strong password for PostgreSQL gitea user
+        database: "gitea"
+      primary:
+        persistence:
+          enabled: true
+          size: "20Gi"
+
+    init:
+      manifestsTemplate: |-
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: gitea-system # Namespace for Gitea and its dependencies within the vcluster
+        ---
+        # cert-manager Namespace and HelmChart (similar to rancher-vcluster example)
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: cert-manager
+          labels:
+            certmanager.k8s.io/disable-validation: "true"
+        ---
+        apiVersion: helm.cattle.io/v1
+        kind: HelmChart
+        metadata:
+          name: cert-manager
+          namespace: kube-system # Deploys from kube-system (vcluster's kube-system)
+        spec:
+          targetNamespace: cert-manager # Deploys into cert-manager namespace
+          repo: https://charts.jetstack.io
+          chart: cert-manager
+          version: {{ .Values.certManager.chartVersion }}
+          helmVersion: v3
+          set:
+            installCRDs: "true"
+        ---
+        # Cloudflare API Token Secret for Gitea's Issuer
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: cloudflare-api-token-secret-gitea
+          namespace: gitea-system
+        type: Opaque
+        data:
+          api-token: {{ .Values.cloudflareApiToken | b64enc }}
+        ---
+        # Let's Encrypt Issuer for Gitea (using cert-manager.io/v1)
+        apiVersion: cert-manager.io/v1
+        kind: Issuer
+        metadata:
+          name: letsencrypt-production-gitea
+          namespace: gitea-system
+        spec:
+          acme:
+            email: {{ .Values.cloudflareEmail }}
+            privateKeySecretRef:
+              name: letsencrypt-production-gitea-private-key
+            server: https://acme-v02.api.letsencrypt.org/directory
+            solvers:
+              - dns01:
+                  cloudflare:
+                    apiTokenSecretRef:
+                      key: api-token
+                      name: cloudflare-api-token-secret-gitea
+                    email: {{ .Values.cloudflareEmail }}
+        ---
+        # Certificate for Gitea Ingress (using cert-manager.io/v1)
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: tls-gitea-ingress
+          namespace: gitea-system
+        spec:
+          secretName: tls-gitea-ingress
+          commonName: gitea.{{ .Values.hostname }}
+          dnsNames:
+            - gitea.{{ .Values.hostname }}
+          issuerRef:
+            name: letsencrypt-production-gitea
+            kind: Issuer
+        ---
+        # HelmChart for PostgreSQL (Bitnami)
+        apiVersion: helm.cattle.io/v1
+        kind: HelmChart
+        metadata:
+          name: postgresql-gitea
+          namespace: kube-system # Deploys from kube-system
+        spec:
+          targetNamespace: gitea-system
+          repo: https://charts.bitnami.com/bitnami # Bitnami Helm repository
+          chart: postgresql
+          version: {{ .Values.postgresql.chartVersion }}
+          helmVersion: v3
+          set:
+            auth.username: {{ .Values.postgresql.auth.username }}
+            auth.password: {{ .Values.postgresql.auth.password }}
+            auth.database: {{ .Values.postgresql.auth.database }}
+            primary.persistence.enabled: {{ .Values.postgresql.primary.persistence.enabled }}
+            primary.persistence.size: {{ .Values.postgresql.primary.persistence.size }}
+            fullnameOverride: postgresql-gitea-svc # Ensures a predictable service name
+        ---
+        # HelmChart for Gitea
+        apiVersion: helm.cattle.io/v1
+        kind: HelmChart
+        metadata:
+          name: gitea
+          namespace: kube-system # Deploys from kube-system
+        spec:
+          targetNamespace: gitea-system
+          repo: https://dl.gitea.io/charts/ # Gitea official Helm chart repository
+          chart: gitea
+          version: {{ .Values.gitea.chartVersion }}
+          helmVersion: v3
+          set:
+            # Ingress Configuration
+            ingress.enabled: "true"
+            ingress.className: "nginx" # Default Harvester ingress controller, adjust if different
+            ingress.hosts[0].host: gitea.{{ .Values.hostname }}
+            ingress.hosts[0].paths[0].path: /
+            ingress.hosts[0].paths[0].pathType: Prefix
+            ingress.tls[0].secretName: tls-gitea-ingress # Use the cert-manager created secret
+            ingress.tls[0].hosts[0]: gitea.{{ .Values.hostname }}
+
+            # Gitea Configuration (populates gitea.ini)
+            gitea.config:
+              server:
+                DOMAIN: gitea.{{ .Values.hostname }}
+                ROOT_URL: https://gitea.{{ .Values.hostname }}/
+                DISABLE_REGISTRATION: {{ .Values.gitea.config.server.disableRegistration }}
+                # OFFLINE_MODE: "false"
+                # LANDING_PAGE: "explore"
+              database:
+                DB_TYPE: "postgres"
+                HOST: "postgresql-gitea-svc.gitea-system:5432" # Service name from postgresql chart + namespace
+                NAME: {{ .Values.postgresql.auth.database }}
+                USER: {{ .Values.postgresql.auth.username }}
+                PASSWD_FROM_SECRET_NAME: "postgresql-gitea-postgresql" # Secret created by Bitnami PostgreSQL chart (release name 'postgresql-gitea' + '-postgresql')
+                PASSWD_FROM_SECRET_KEY: "postgres-password" # Key within the Bitnami PostgreSQL secret
+                SSL_MODE: "disable" # Change to "require" or "verify-full" if PostgreSQL SSL is configured
+              service:
+                ENABLE_CAPTCHA: "false" # Simplifies setup; consider enabling for public instances
+              actions:
+                ENABLED: {{ .Values.gitea.config.actions.enabled }}
+              # Example: Add more app.ini settings here if needed
+              # session:
+              #   COOKIE_SECURE: "true"
+              # log:
+              #   LEVEL: Info
+
+            # Gitea Admin User (chart creates a secret 'gitea-admin' with these credentials)
+            admin:
+              # create: true # Default is true if username/password is provided
+              username: {{ .Values.gitea.admin.username }}
+              password: {{ .Values.gitea.admin.password }}
+
+            # Gitea Persistence
+            persistence:
+              enabled: {{ .Values.gitea.persistence.enabled }}
+              size: {{ .Values.gitea.persistence.size }}
+              # storageClass: "" # Explicitly set if needed, otherwise uses default
+
+            # Disable Gitea's bundled PostgreSQL (we are using the Bitnami one)
+            postgresql:
+              enabled: false
+
+            # Gitea resources (adjust as needed)
+            # resources:
+            #   requests:
+            #     cpu: 200m
+            #     memory: 512Mi
+            #   limits:
+            #     cpu: "1"
+            #     memory: 2Gi
+
+            # Gitea service settings (SSH, HTTP)
+            # service:
+            #   ssh:
+            #     type: ClusterIP # Default, SSH access would be internal to vcluster
+            #     port: 22
+            #   http:
+            #     type: ClusterIP # Default, HTTP access is via Ingress
+            #     port: 3000
+
+            # If you need to run Gitea Actions runners within the same vcluster,
+            # you would typically deploy them as separate Helm charts or manifests.
+            # This configuration only enables the Actions feature in Gitea server.
